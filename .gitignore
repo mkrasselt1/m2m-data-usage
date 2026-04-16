@@ -1,0 +1,7 @@
+/vendor/
+/m2m_config.ini
+/data_usage*.csv
+/portal_export.csv
+/m2m_scrape/
+composer.lock
+*.cache

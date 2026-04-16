@@ -1,0 +1,24 @@
+{
+    "name": "krasselt/m2m-data-usage",
+    "description": "Extract SIM card data usage from the m2m-mobil.de management portal",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Michael Krasselt"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "guzzlehttp/guzzle": "^7.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Krasselt\\M2mDataUsage\\": "src/"
+        }
+    },
+    "bin": [
+        "bin/m2m-extract"
+    ],
+    "minimum-stability": "stable"
+}

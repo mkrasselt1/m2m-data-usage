@@ -1,0 +1,214 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * M2M Data Usage Extractor — CLI
+ *
+ * Usage:
+ *   php bin/m2m-extract                         # interactive month selection
+ *   php bin/m2m-extract --month all             # all available months
+ *   php bin/m2m-extract --month completed       # only completed months
+ *   php bin/m2m-extract --month "März 2026"     # specific month
+ *   php bin/m2m-extract --config path/to/config.ini
+ */
+
+// Find autoloader
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+];
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        require $path;
+        break;
+    }
+}
+
+use Krasselt\M2mDataUsage\Client;
+use Krasselt\M2mDataUsage\Model\MonthlyUsage;
+
+// --- Parse CLI arguments ---
+$options = getopt('c:u:p:m:o:d:h', [
+    'config:', 'username:', 'password:', 'month:', 'output:', 'output-dir:', 'help',
+]);
+
+if (isset($options['h']) || isset($options['help'])) {
+    echo <<<HELP
+    M2M Data Usage Extractor
+
+    Options:
+      -c, --config      Config file path (default: m2m_config.ini)
+      -u, --username    Portal username
+      -p, --password    Portal password
+      -m, --month       Month to extract: name, "all", or "completed"
+      -o, --output      Combined CSV output file (default: data_usage.csv)
+      -d, --output-dir  Directory for per-month files (default: .)
+      -h, --help        Show this help
+
+    HELP;
+    exit(0);
+}
+
+$configPath = $options['c'] ?? $options['config'] ?? 'm2m_config.ini';
+$monthArg   = $options['m'] ?? $options['month'] ?? null;
+$outputFile = $options['o'] ?? $options['output'] ?? 'data_usage.csv';
+$outputDir  = $options['d'] ?? $options['output-dir'] ?? '.';
+
+// --- Load config ---
+$config = [];
+if (file_exists($configPath)) {
+    $ini = parse_ini_file($configPath, true);
+    $config = $ini['credentials'] ?? [];
+}
+
+$username = $options['u'] ?? $options['username'] ?? $config['username'] ?? getenv('M2M_USERNAME') ?: '';
+$password = $options['p'] ?? $options['password'] ?? $config['password'] ?? getenv('M2M_PASSWORD') ?: '';
+
+if (empty($username) || empty($password)) {
+    fwrite(STDERR, "Error: Username and password required.\n");
+    fwrite(STDERR, "Use -u/-p, set M2M_USERNAME/M2M_PASSWORD env vars, or create m2m_config.ini\n");
+    exit(1);
+}
+
+// --- Run extraction ---
+try {
+    $client = new Client($username, $password);
+
+    echo "Logging in ...\n";
+    $client->login();
+    echo "Login successful.\n\n";
+
+    echo "Fetching SIM card list ...\n";
+    $simCards = $client->fetchSimCards();
+    echo sprintf("Found %d SIM cards.\n\n", count($simCards));
+
+    echo "Fetching monthly usage details ...\n";
+    $allDetails = $client->fetchAllUsageDetails($simCards, function (int $current, int $total, $sim) {
+        echo sprintf("  [%d/%d] %s\n", $current, $total, $sim->iccid);
+    });
+    echo "\n";
+
+    // Determine available months
+    $availableMonths = Client::availableMonths($allDetails);
+    if (empty($availableMonths)) {
+        echo "No monthly data available.\n";
+        exit(0);
+    }
+
+    echo "Available months:\n";
+    foreach ($availableMonths as $i => $m) {
+        $mu = new MonthlyUsage($m, 0, 0);
+        $label = $mu->isCompleted() ? '(completed)' : '(current)';
+        echo sprintf("  [%d] %s %s\n", $i, $m, $label);
+    }
+
+    // Select months
+    if ($monthArg !== null && strtolower($monthArg) === 'all') {
+        $selectedMonths = $availableMonths;
+    } elseif ($monthArg !== null && strtolower($monthArg) === 'completed') {
+        $selectedMonths = array_filter($availableMonths, function (string $m) {
+            return (new MonthlyUsage($m, 0, 0))->isCompleted();
+        });
+        if (empty($selectedMonths)) {
+            echo "No completed months found.\n";
+            exit(0);
+        }
+    } elseif ($monthArg !== null) {
+        $selectedMonths = array_filter($availableMonths, function (string $m) use ($monthArg) {
+            return stripos($m, $monthArg) !== false;
+        });
+        if (empty($selectedMonths)) {
+            fwrite(STDERR, sprintf("Error: Month '%s' not found.\n", $monthArg));
+            exit(1);
+        }
+    } else {
+        // Interactive
+        echo "\nSelect month number (or 'all'/'completed'/Enter for newest): ";
+        $choice = trim(fgets(STDIN) ?: '');
+        if (strtolower($choice) === 'all') {
+            $selectedMonths = $availableMonths;
+        } elseif (strtolower($choice) === 'completed') {
+            $selectedMonths = array_filter($availableMonths, fn($m) => (new MonthlyUsage($m, 0, 0))->isCompleted());
+        } elseif (is_numeric($choice) && isset($availableMonths[(int) $choice])) {
+            $selectedMonths = [$availableMonths[(int) $choice]];
+        } else {
+            $selectedMonths = [$availableMonths[0]];
+        }
+    }
+
+    $selectedMonths = array_values($selectedMonths);
+    echo sprintf("\nExtracting data for: %s\n", implode(', ', $selectedMonths));
+
+    // Build details lookup: cardId -> [month => MonthlyUsage]
+    $detailsByCard = [];
+    foreach ($allDetails as $cardId => $months) {
+        foreach ($months as $mu) {
+            $detailsByCard[$cardId][$mu->month] = $mu;
+        }
+    }
+
+    // CSV header
+    $header = ['month', 'iccid', 'rufnummer', 'tarif', 'status', 'tags', 'used_mb', 'included_mb'];
+
+    // Build rows per month
+    $allRows = [];
+    if (!is_dir($outputDir)) {
+        mkdir($outputDir, 0755, true);
+    }
+
+    foreach ($selectedMonths as $month) {
+        $monthRows = [];
+        foreach ($simCards as $sim) {
+            $mu = $detailsByCard[$sim->cardId][$month] ?? null;
+            $monthRows[] = [
+                'month' => $month,
+                'iccid' => $sim->iccid,
+                'rufnummer' => $sim->rufnummer,
+                'tarif' => $sim->tarif,
+                'status' => $sim->status,
+                'tags' => $sim->tagsAsString(),
+                'used_mb' => $mu !== null ? sprintf('%.2f', $mu->usedMb) : '',
+                'included_mb' => $mu !== null ? sprintf('%.2f', $mu->includedMb) : '',
+            ];
+        }
+        $allRows = array_merge($allRows, $monthRows);
+
+        // Write per-month file for completed months
+        $muCheck = new MonthlyUsage($month, 0, 0);
+        $activeRows = array_filter($monthRows, fn($r) => $r['used_mb'] !== '');
+        $totalMb = array_sum(array_map(fn($r) => (float) $r['used_mb'], $activeRows));
+
+        if ($muCheck->isCompleted()) {
+            $monthFile = $outputDir . '/data_usage_' . $muCheck->yearMonth() . '.csv';
+            writeCsv($monthFile, $header, $monthRows);
+            echo sprintf("  %s: %d active SIMs, %.0f MB total -> %s\n",
+                $month, count($activeRows), $totalMb, $monthFile);
+        } else {
+            echo sprintf("  %s (current, not saved separately): %d active SIMs, %.0f MB\n",
+                $month, count($activeRows), $totalMb);
+        }
+    }
+
+    // Write combined file
+    writeCsv($outputFile, $header, $allRows);
+    echo sprintf("\nCombined: %d rows written to %s\n", count($allRows), $outputFile);
+
+} catch (\Throwable $e) {
+    fwrite(STDERR, sprintf("Error: %s\n", $e->getMessage()));
+    exit(1);
+}
+
+function writeCsv(string $path, array $header, array $rows): void
+{
+    $fp = fopen($path, 'w');
+    if ($fp === false) {
+        throw new \RuntimeException("Cannot open file: $path");
+    }
+    fputcsv($fp, $header, ';');
+    foreach ($rows as $row) {
+        fputcsv($fp, $row, ';');
+    }
+    fclose($fp);
+}
