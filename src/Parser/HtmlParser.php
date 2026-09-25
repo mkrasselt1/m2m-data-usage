@@ -42,6 +42,101 @@ class HtmlParser
     }
 
     /**
+     * Parse the "pinpuk" column HTML into PIN and PUK.
+     *
+     * The exact markup of the portal cell is not known, so this is deliberately
+     * tolerant: labelled values ("PIN: 1234", "PUK1 12345678") win; without
+     * labels the digit sequences are classified by length (PUK = 8 digits,
+     * PIN = 4-7 digits). Cells without any digits ("", "--", "n/a", "k.A.")
+     * yield null for both.
+     *
+     * @return array{pin: ?string, puk: ?string}
+     */
+    public static function parsePinPuk(string $html): array
+    {
+        $text = self::normalizePinPukText($html);
+
+        if ($text === '' || !preg_match('/\d/', $text)) {
+            return ['pin' => null, 'puk' => null];
+        }
+
+        // Labelled values. The optional "1" suffix ("PIN1", "PIN 1", "PUK1") is
+        // matched lazily so that "PIN 12345" is not read as label "1" + "2345".
+        $pinPattern = '/\bPIN(?:\s?1)??\s*[:=]?\s*(\d{4,8})(?!\d)/i';
+        $pukPattern = '/\bPUK(?:\s?1)??\s*[:=]?\s*(\d{8})(?!\d)/i';
+
+        $pin = null;
+        $puk = null;
+        $rest = $text;
+
+        if (preg_match($pinPattern, $text, $m)) {
+            $pin = $m[1];
+            $rest = str_replace($m[0], ' ', $rest);
+        }
+        if (preg_match($pukPattern, $text, $m)) {
+            $puk = $m[1];
+            $rest = str_replace($m[0], ' ', $rest);
+        }
+
+        if ($pin !== null && $puk !== null) {
+            return ['pin' => $pin, 'puk' => $puk];
+        }
+
+        // Fallback: unlabelled digit sequences (4-8 digits) from what is left.
+        preg_match_all('/(?<!\d)\d{4,8}(?!\d)/', $rest, $m);
+        $sequences = $m[0];
+        $eight = array_values(array_filter($sequences, static fn(string $s): bool => strlen($s) === 8));
+        $short = array_values(array_filter($sequences, static fn(string $s): bool => strlen($s) < 8));
+
+        if ($pin === null && $puk === null) {
+            if ($eight !== [] && $short !== []) {
+                return ['pin' => $short[0], 'puk' => $eight[0]];
+            }
+            if (count($sequences) === 1) {
+                return ['pin' => $sequences[0], 'puk' => null];
+            }
+            if ($sequences !== []) {
+                // Several sequences of the same class: first is the PIN, a
+                // further 8-digit one is taken as PUK.
+                $pin = $sequences[0];
+                $puk = null;
+                foreach (array_slice($sequences, 1) as $s) {
+                    if (strlen($s) === 8) {
+                        $puk = $s;
+                        break;
+                    }
+                }
+                return ['pin' => $pin, 'puk' => $puk];
+            }
+            return ['pin' => null, 'puk' => null];
+        }
+
+        if ($pin === null) {
+            // PUK was labelled, PIN not: first remaining 4-8 digit sequence.
+            $pin = $sequences[0] ?? null;
+        } elseif ($puk === null) {
+            // PIN was labelled, PUK not: first remaining 8-digit sequence.
+            $puk = $eight[0] ?? null;
+        }
+
+        return ['pin' => $pin, 'puk' => $puk];
+    }
+
+    /**
+     * Reduce cell HTML to a single line of plain text: tags become spaces,
+     * entities are decoded, non-breaking spaces and whitespace runs collapse.
+     */
+    private static function normalizePinPukText(string $html): string
+    {
+        $text = preg_replace('/<[^>]*>/', ' ', $html) ?? $html;
+        $text = self::stripHtml($text);
+        $text = str_replace("\u{00A0}", ' ', $text);
+        $text = preg_replace('/\s+/u', ' ', $text) ?? $text;
+
+        return trim($text);
+    }
+
+    /**
      * Parse a raw DataTables JSON row into a SimCard.
      */
     public static function parseSimRecord(array $raw): SimCard
@@ -50,6 +145,8 @@ class HtmlParser
         if (preg_match('/value="(\d+)"/', $raw['checkbox'] ?? '', $m)) {
             $cardId = $m[1];
         }
+
+        $pinPuk = self::parsePinPuk((string) ($raw['pinpuk'] ?? ''));
 
         return new SimCard(
             cardId: $cardId,
@@ -61,6 +158,8 @@ class HtmlParser
             aktivierung: self::stripHtml((string) ($raw['datum_akt'] ?? '')),
             tags: self::parseTags((string) ($raw['tags'] ?? '')),
             currentUsage: self::stripHtml((string) ($raw['moredata'] ?? '')),
+            pin: $pinPuk['pin'],
+            puk: $pinPuk['puk'],
         );
     }
 

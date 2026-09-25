@@ -19,6 +19,8 @@ class SimCard
         public readonly string $aktivierung,
         public readonly array  $tags,
         public readonly string $currentUsage,
+        public readonly ?string $pin = null,
+        public readonly ?string $puk = null,
     ) {
     }
 
@@ -26,6 +28,11 @@ class SimCard
     {
         return stripos($this->status, 'Aktiv') !== false
             && stripos($this->status, 'Deaktiviert') === false;
+    }
+
+    public function hasPin(): bool
+    {
+        return $this->pin !== null && $this->pin !== '';
     }
 
     public function tagsAsString(): string

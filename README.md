@@ -39,6 +39,23 @@ foreach ($simCards as $sim) {
 }
 ```
 
+## PIN/PUK
+
+The SIM list contains the portal's `pinpuk` column. It is parsed into the
+`SimCard` fields `pin` and `puk` (`?string`); both are `null` when the portal
+does not deliver a value (e.g. `--` or an empty cell).
+
+```php
+foreach ($simCards as $sim) {
+    if ($sim->hasPin()) {
+        // $sim->pin  e.g. "1234"
+        // $sim->puk  e.g. "12345678" or null
+    }
+}
+```
+
+The CLI export (`bin/m2m-extract`) intentionally does not write PIN/PUK to CSV.
+
 ## CLI Usage
 
 ```bash

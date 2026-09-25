@@ -5,3 +5,4 @@
 /m2m_scrape/
 composer.lock
 *.cache
+.phpunit.cache/
